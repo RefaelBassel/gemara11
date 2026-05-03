@@ -2,8 +2,10 @@ import { NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { db, ensureSchema } from "@/lib/db";
-import { getExam } from "@/lib/exams-data";
+import { getExam, type Question } from "@/lib/exams-data";
 import { levelFromXp, XP } from "@/lib/xp";
+import { gradeOpenAnswer } from "@/lib/grader";
+import { fillMatches } from "@/lib/normalize";
 
 export const dynamic = "force-dynamic";
 
@@ -22,6 +24,80 @@ export async function GET(req: Request) {
   return NextResponse.json({ rows: r.rows });
 }
 
+type AnswerResult = {
+  type: Question["type"];
+  score: number; // 0-100
+  correct?: boolean;
+  feedback?: string;
+  sample?: string;
+  expected?: unknown; // shown after submission
+};
+
+async function gradeQuestion(q: Question, answer: unknown): Promise<AnswerResult> {
+  switch (q.type) {
+    case "multi": {
+      const a = typeof answer === "number" ? answer : -1;
+      const ok = a === q.correct;
+      return { type: "multi", score: ok ? 100 : 0, correct: ok, expected: q.correct };
+    }
+    case "tf": {
+      const a = typeof answer === "boolean" ? answer : null;
+      const ok = a === q.correct;
+      return {
+        type: "tf",
+        score: ok ? 100 : 0,
+        correct: ok,
+        expected: q.correct,
+        feedback: q.explanation,
+      };
+    }
+    case "fill": {
+      const arr = Array.isArray(answer) ? (answer as string[]) : [];
+      let correctCount = 0;
+      for (let i = 0; i < q.blanks.length; i++) {
+        if (fillMatches(q.blanks[i], String(arr[i] ?? ""))) correctCount++;
+      }
+      const score = Math.round((correctCount / q.blanks.length) * 100);
+      return {
+        type: "fill",
+        score,
+        correct: correctCount === q.blanks.length,
+        expected: q.blanks.map((b) => b[0]),
+      };
+    }
+    case "match": {
+      const arr = Array.isArray(answer) ? (answer as string[]) : [];
+      let correctCount = 0;
+      for (let i = 0; i < q.right.length; i++) {
+        if (String(arr[i] ?? "").trim() === q.right[i]) correctCount++;
+      }
+      const score = Math.round((correctCount / q.right.length) * 100);
+      return {
+        type: "match",
+        score,
+        correct: correctCount === q.right.length,
+        expected: q.right,
+      };
+    }
+    case "open": {
+      const a = typeof answer === "string" ? answer : "";
+      const r = await gradeOpenAnswer({
+        question: q.q,
+        sample: q.sample,
+        rubric: q.rubric,
+        answer: a,
+      });
+      return {
+        type: "open",
+        score: r.score,
+        correct: r.score >= 70,
+        feedback: r.feedback,
+        sample: q.sample,
+      };
+    }
+  }
+}
+
 export async function POST(req: Request) {
   await ensureSchema();
   const session = await getServerSession(authOptions);
@@ -31,20 +107,29 @@ export async function POST(req: Request) {
   const body = (await req.json().catch(() => ({}))) as {
     examId?: string;
     sugiyaId?: number;
-    score?: number;
+    answers?: unknown[];
   };
-  const { examId, sugiyaId, score } = body;
-  if (!examId || typeof sugiyaId !== "number" || typeof score !== "number") {
+  const { examId, sugiyaId, answers } = body;
+  if (!examId || typeof sugiyaId !== "number" || !Array.isArray(answers)) {
     return NextResponse.json({ error: "invalid" }, { status: 400 });
   }
   const exam = getExam(examId);
   if (!exam) return NextResponse.json({ error: "exam not found" }, { status: 404 });
   const sugiya = exam.sugiyot.find((s) => s.id === sugiyaId);
   if (!sugiya) return NextResponse.json({ error: "sugiya not found" }, { status: 404 });
+  if (answers.length !== sugiya.questions.length) {
+    return NextResponse.json({ error: "answer count mismatch" }, { status: 400 });
+  }
 
-  const c = db();
+  // Grade in parallel — Claude calls run concurrently for speed
+  const perQuestion = await Promise.all(
+    sugiya.questions.map((q, i) => gradeQuestion(q, answers[i])),
+  );
+  const total = perQuestion.reduce((s, r) => s + r.score, 0);
+  const score = Math.round(total / perQuestion.length);
   const passed = score >= 70;
 
+  const c = db();
   const existing = await c.execute({
     sql: "SELECT completed, score, attempts FROM progress WHERE user_id = ? AND exam_id = ? AND sugiya_id = ?",
     args: [uid, examId, sugiyaId],
@@ -94,7 +179,10 @@ export async function POST(req: Request) {
   }
 
   if (xpGained > 0) {
-    const before = await c.execute({ sql: "SELECT xp, level FROM users WHERE id = ?", args: [uid] });
+    const before = await c.execute({
+      sql: "SELECT xp, level FROM users WHERE id = ?",
+      args: [uid],
+    });
     const beforeXp = Number(before.rows[0]?.xp ?? 0);
     const beforeLevel = Number(before.rows[0]?.level ?? 1);
     const afterXp = beforeXp + xpGained;
@@ -116,6 +204,7 @@ export async function POST(req: Request) {
     passed,
     newCompleted,
     score,
+    perQuestion,
     xpGained,
     xpEvents,
     leveledUp,
