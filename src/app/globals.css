@@ -1,0 +1,40 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+}
+
+html,
+body {
+  background: #f5f7fa;
+  color: #1a1a1a;
+}
+
+body {
+  font-family: "Heebo", system-ui, sans-serif;
+}
+
+.gemara-text {
+  font-family: "Frank Ruhl Libre", serif;
+}
+
+/* PDF iframe wrapper helpers */
+.pdf-frame {
+  width: 100%;
+  height: 70vh;
+  border: 0;
+  border-radius: 12px;
+  background: #fff;
+}
+@media (max-width: 768px) {
+  .pdf-frame {
+    height: 50vh;
+  }
+}
+
+/* RTL fixes for progress bars */
+.progress-fill {
+  transition: width 0.6s ease;
+}
