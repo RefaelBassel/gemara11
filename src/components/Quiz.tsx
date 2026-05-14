@@ -517,15 +517,16 @@ function MatchRender({
   onChange: (v: string[]) => void;
   submitted: boolean;
 }) {
-  // Shuffle the right column for display, deterministic per question text
-  const shuffledRight = useMemo(() => shuffle(q.right, q.q), [q]);
-  // Compute used: each right item can be used at most once
-  const used = new Set(answer.filter(Boolean));
+  // Display unique right-column values only (dedup), shuffled deterministically.
+  // Same value may be the correct answer for multiple left rows (categorization)
+  // — selecting it for one row does NOT lock it from other rows.
+  const options = useMemo(() => {
+    const uniq = Array.from(new Set(q.right));
+    return shuffle(uniq, q.q);
+  }, [q]);
 
   function setPair(leftIdx: number, val: string) {
     const c = [...answer];
-    // If this value was used elsewhere, clear it there
-    for (let i = 0; i < c.length; i++) if (c[i] === val) c[i] = "";
     c[leftIdx] = val;
     onChange(c);
   }
@@ -551,9 +552,8 @@ function MatchRender({
             <div key={i} className={`border-2 rounded-lg p-3 ${cls}`}>
               <div className="font-semibold mb-2 text-sm">{leftItem}</div>
               <div className="flex flex-wrap gap-1.5">
-                {shuffledRight.map((opt, j) => {
+                {options.map((opt, j) => {
                   const isSel = sel === opt;
-                  const taken = used.has(opt) && !isSel;
                   let bcls = "border-border bg-white hover:border-primary-light";
                   if (submitted) {
                     if (isSel && isCorrect) bcls = "border-success bg-success text-white";
@@ -561,14 +561,12 @@ function MatchRender({
                     else bcls = "border-border bg-white opacity-50";
                   } else if (isSel) {
                     bcls = "border-primary bg-blue-50 text-primary font-semibold";
-                  } else if (taken) {
-                    bcls = "border-border bg-gray-100 opacity-40 cursor-not-allowed";
                   }
                   return (
                     <button
                       key={j}
                       type="button"
-                      disabled={submitted || (taken && !isSel)}
+                      disabled={submitted}
                       onClick={() => (isSel ? clear(i) : setPair(i, opt))}
                       className={`text-xs sm:text-sm border-2 rounded-md px-2 py-1 transition ${bcls}`}
                     >
